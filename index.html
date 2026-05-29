@@ -544,7 +544,7 @@ input[type=file] { display: none; }
             </div>
             <button class="btn-upload" id="btnUpload">ファイルを選択</button>
           </div>
-          <input type="file" id="fileInput" accept="image/*">
+          <input type="file" id="fileInput" accept="image/*" style="display:none">
         </div>
       </div>
 
@@ -751,25 +751,31 @@ let settings = {
 };
 
 // ── Upload ──
-document.getElementById('btnUpload').addEventListener('click', e => {
-  e.stopPropagation();
-  document.getElementById('fileInput').click();
+// ファイル選択ボタン — stopPropagationでdrop-zoneへの伝播を防ぐ
+const _fileInput = document.getElementById('fileInput');
+const _btnUpload = document.getElementById('btnUpload');
+const _dropZone  = document.getElementById('dropZone');
+
+_btnUpload.addEventListener('click', e => {
+  e.stopPropagation();   // drop-zoneのclickに伝播させない
+  _fileInput.click();
 });
 
-document.getElementById('dropZone').addEventListener('dragover', e => {
-  e.preventDefault();
-  document.getElementById('dropZone').classList.add('drag-over');
-});
-document.getElementById('dropZone').addEventListener('dragleave', () => {
-  document.getElementById('dropZone').classList.remove('drag-over');
-});
-document.getElementById('dropZone').addEventListener('drop', e => {
-  e.preventDefault();
-  document.getElementById('dropZone').classList.remove('drag-over');
-  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
-});
-document.getElementById('fileInput').addEventListener('change', e => {
+_fileInput.addEventListener('change', e => {
   if (e.target.files[0]) loadFile(e.target.files[0]);
+});
+
+_dropZone.addEventListener('dragover', e => {
+  e.preventDefault();
+  _dropZone.classList.add('drag-over');
+});
+_dropZone.addEventListener('dragleave', () => {
+  _dropZone.classList.remove('drag-over');
+});
+_dropZone.addEventListener('drop', e => {
+  e.preventDefault();
+  _dropZone.classList.remove('drag-over');
+  if (e.dataTransfer.files[0]) loadFile(e.dataTransfer.files[0]);
 });
 
 function loadFile(file) {
