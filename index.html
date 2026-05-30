@@ -571,7 +571,7 @@ input[type=file] { display: none; }
               <div class="setting-desc">切り出し時の余白 (px)</div>
             </div>
             <div class="slider-inline">
-              <input type="range" id="slPadding" min="0" max="60" value="20" oninput="document.getElementById('vPadding').textContent=this.value">
+              <input type="range" id="slPadding" min="0" max="60" value="20" oninput="document.getElementById('vPadding').textContent=this.value;if(sourceImageData)drawOverlay(regions);">
               <span class="val-badge" id="vPadding">20</span>
             </div>
           </div>
@@ -594,7 +594,7 @@ input[type=file] { display: none; }
               <div class="setting-desc">白とみなすRGB閾値</div>
             </div>
             <div class="slider-inline">
-              <input type="range" id="slThreshold" min="180" max="254" value="240" oninput="document.getElementById('vThreshold').textContent=this.value">
+              <input type="range" id="slThreshold" min="180" max="254" value="240" oninput="document.getElementById('vThreshold').textContent=this.value;if(sourceImageData)detectRegions(true);">
               <span class="val-badge" id="vThreshold">240</span>
             </div>
           </div>
@@ -878,42 +878,47 @@ function detectRegions(previewOnly = false) {
     }
   }
 
-  // 4. Merge overlapping/close boxes and filter small ones
+  // 4. フィルタリング
   let rects = Object.values(boxes)
     .filter(b => b.count >= minSize)
     .map(b => ({ x: b.minX, y: b.minY, w: b.maxX-b.minX, h: b.maxY-b.minY }));
 
-  // Merge boxes that are close to each other (gap < 30px)
-  const gap = 40;
-  let merged = true;
-  while (merged) {
-    merged = false;
+  // ── スマートマージ: 同一キャラのパーツだけ結合 ──
+  // gap = 小さい方のboxの短辺の35%以内、かつ最大25pxに制限
+  // → 離れたキャラ同士は絶対に合体しない
+  let didMerge = true;
+  while (didMerge) {
+    didMerge = false;
+    outer:
     for (let i = 0; i < rects.length; i++) {
       for (let j = i+1; j < rects.length; j++) {
         const a = rects[i], b = rects[j];
         const ax2 = a.x+a.w, ay2 = a.y+a.h;
         const bx2 = b.x+b.w, by2 = b.y+b.h;
-        const overlapX = Math.min(ax2, bx2) - Math.max(a.x, b.x) > -gap;
-        const overlapY = Math.min(ay2, by2) - Math.max(a.y, b.y) > -gap;
-        if (overlapX && overlapY) {
+        const gapX = Math.min(Math.min(a.w, b.w) * 0.35, 25);
+        const gapY = Math.min(Math.min(a.h, b.h) * 0.35, 25);
+        const closeX = Math.min(ax2, bx2) - Math.max(a.x, b.x) > -gapX;
+        const closeY = Math.min(ay2, by2) - Math.max(a.y, b.y) > -gapY;
+        if (closeX && closeY) {
           rects[i] = {
             x: Math.min(a.x, b.x), y: Math.min(a.y, b.y),
             w: Math.max(ax2, bx2) - Math.min(a.x, b.x),
             h: Math.max(ay2, by2) - Math.min(a.y, b.y)
           };
           rects.splice(j, 1);
-          merged = true;
-          break;
+          didMerge = true;
+          break outer;
         }
       }
-      if (merged) break;
     }
   }
 
-  // Sort left-to-right, top-to-bottom
+  // ── 上→下、左→右でソート（重心Y座標で行を判定）──
   rects.sort((a, b) => {
-    const rowA = Math.floor(a.y / 100), rowB = Math.floor(b.y / 100);
-    if (rowA !== rowB) return rowA - rowB;
+    const midAy = a.y + a.h / 2;
+    const midBy = b.y + b.h / 2;
+    const rowThresh = Math.min(a.h, b.h) * 0.55;
+    if (Math.abs(midAy - midBy) > rowThresh) return midAy - midBy;
     return a.x - b.x;
   });
 
