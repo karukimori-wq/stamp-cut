@@ -1010,60 +1010,57 @@ async function runProcess() {
 
 async function sharpenCanvas(src, scale, sharpAmt, edgeAmt, lineDarkAmt, preBlurAmt) {
   const W = src.width, H = src.height;
-  const BW = W * scale, BH = H * scale;
 
-  // Upscale
-  const big = document.createElement('canvas');
-  big.width = BW; big.height = BH;
-  const bigCtx = big.getContext('2d');
-  bigCtx.imageSmoothingEnabled = true;
-  bigCtx.imageSmoothingQuality = 'high';
-  bigCtx.drawImage(src, 0, 0, BW, BH);
-  let px = new Uint8ClampedArray(bigCtx.getImageData(0, 0, BW, BH).data);
+  // ── STEP 1: アップスケール ──
+  let curW = W * scale, curH = H * scale;
+  let curCanvas = document.createElement('canvas');
+  curCanvas.width = curW; curCanvas.height = curH;
+  const upCtx = curCanvas.getContext('2d');
+  upCtx.imageSmoothingEnabled = true;
+  upCtx.imageSmoothingQuality = 'high';
+  upCtx.drawImage(src, 0, 0, curW, curH);
+  let px = new Uint8ClampedArray(upCtx.getImageData(0, 0, curW, curH).data);
 
-  // Unsharp mask
+  // ── STEP 2: 縮小前ブラー（ジャギー除去） ──
+  // scaleに応じたsigma。ブラー0でスキップ
+  if (preBlurAmt > 0 && scale > 1) {
+    const sigma = Math.sqrt(scale) * (preBlurAmt / 100) * 1.4;
+    px = gaussianBlur(px, curW, curH, sigma);
+  }
+
+  // ── STEP 3: アンシャープマスク（シャープ強度が0より大きい時のみ） ──
+  // ブラー後にかけることで「なめらか＋くっきり」を両立
   if (sharpAmt > 0) {
-    const amount = sharpAmt / 100 * 2.8;
-    const blurred = boxBlur(px, BW, BH, scale);
-    const blurredMid = boxBlur(px, BW, BH, scale * 3);
+    const amount = sharpAmt / 100 * 1.5; // 係数を抑えめに
+    const blurred = gaussianBlur(px, curW, curH, 1.0);
     for (let i = 0; i < px.length; i += 4) {
       for (let c = 0; c < 3; c++) {
-        const diff = px[i+c] - blurred[i+c];
-        const diffMid = px[i+c] - blurredMid[i+c];
-        px[i+c] = clamp(px[i+c] + diff * amount + diffMid * (amount * 0.4));
+        px[i+c] = clamp(px[i+c] + (px[i+c] - blurred[i+c]) * amount);
       }
     }
   }
 
-  // Sobel edge boost
+  // ── STEP 4: 細いエッジ強調（ DoG = Difference of Gaussians ） ──
+  // SobelではなくDoGを使うことで線を太らせずに輪郭を強調
   if (edgeAmt > 0) {
     const ea = edgeAmt / 100;
-    const gray = new Float32Array(BW * BH);
-    for (let i = 0; i < BW*BH; i++) gray[i] = 0.299*px[i*4]+0.587*px[i*4+1]+0.114*px[i*4+2];
-    const mag = new Float32Array(BW * BH);
-    let maxM = 0;
-    for (let y = 1; y < BH-1; y++) {
-      for (let x = 1; x < BW-1; x++) {
-        const gx = -gray[(y-1)*BW+(x-1)]+gray[(y-1)*BW+(x+1)]-2*gray[y*BW+(x-1)]+2*gray[y*BW+(x+1)]-gray[(y+1)*BW+(x-1)]+gray[(y+1)*BW+(x+1)];
-        const gy = -gray[(y-1)*BW+(x-1)]-2*gray[(y-1)*BW+x]-gray[(y-1)*BW+(x+1)]+gray[(y+1)*BW+(x-1)]+2*gray[(y+1)*BW+x]+gray[(y+1)*BW+(x+1)];
-        mag[y*BW+x] = Math.sqrt(gx*gx+gy*gy);
-        if (mag[y*BW+x] > maxM) maxM = mag[y*BW+x];
-      }
-    }
-    if (maxM > 0) {
-      for (let i = 0; i < BW*BH; i++) {
-        const t = Math.min(1, (mag[i]/maxM) * ea * 3.2);
-        const s = t*t*(3-2*t);
-        px[i*4]   = clamp(px[i*4]   * (1 - s * 0.9));
-        px[i*4+1] = clamp(px[i*4+1] * (1 - s * 0.9));
-        px[i*4+2] = clamp(px[i*4+2] * (1 - s * 0.9));
+    const blur1 = gaussianBlur(px, curW, curH, 0.8);
+    const blur2 = gaussianBlur(px, curW, curH, 2.5);
+    for (let i = 0; i < px.length; i += 4) {
+      for (let c = 0; c < 3; c++) {
+        // DoG: 細いブラー - 太いブラー = エッジ成分
+        const dog = blur1[i+c] - blur2[i+c];
+        // エッジが暗い方向（輪郭線）のみ強調
+        if (dog < 0) {
+          px[i+c] = clamp(px[i+c] + dog * ea * 1.8);
+        }
       }
     }
   }
 
-  // Line darken
+  // ── STEP 5: 線の濃さ（ガンマ補正） ──
   if (lineDarkAmt > 0) {
-    const gamma = 1 + lineDarkAmt / 100 * 1.4;
+    const gamma = 1 + lineDarkAmt / 100 * 1.2;
     const lut = new Uint8ClampedArray(256);
     for (let v = 0; v < 256; v++) lut[v] = clamp(Math.pow(v/255, gamma)*255);
     for (let i = 0; i < px.length; i += 4) {
@@ -1071,30 +1068,34 @@ async function sharpenCanvas(src, scale, sharpAmt, edgeAmt, lineDarkAmt, preBlur
     }
   }
 
-  // ── Pre-downscale blur: ジャギーをぼかしてから縮小 ──
-  // scaleに比例したsigmaをかける（縮小で自然にアンチエイリアスされる）
-  if (preBlurAmt > 0 && scale > 1) {
-    // sigma = scale * preBlur強度。scale=2なら最大2px、scale=8なら最大8px
-    const sigma = (scale * 0.5) * (preBlurAmt / 100) * 1.6;
-    px = gaussianBlur(px, BW, BH, sigma);
+  // ── STEP 6: 段階的縮小（×8→×4→×2→元サイズ） ──
+  // 一度に縮小するより各段階でアンチエイリアスが効いてなめらかになる
+  let resultCanvas = document.createElement('canvas');
+  resultCanvas.width = curW; resultCanvas.height = curH;
+  resultCanvas.getContext('2d').putImageData(new ImageData(px, curW, curH), 0, 0);
+
+  if (scale > 1) {
+    // 縮小ステップを計算: 2のべき乗で段階的に
+    let steps = [];
+    let s = scale;
+    while (s > 1) {
+      s = Math.max(1, Math.floor(s / 2));
+      steps.push(s);
+    }
+    for (const step of steps) {
+      const nextW = W * step, nextH = H * step;
+      const nextCanvas = document.createElement('canvas');
+      nextCanvas.width = nextW; nextCanvas.height = nextH;
+      const ctx = nextCanvas.getContext('2d');
+      ctx.imageSmoothingEnabled = true;
+      ctx.imageSmoothingQuality = 'high';
+      ctx.drawImage(resultCanvas, 0, 0, nextW, nextH);
+      resultCanvas = nextCanvas;
+      curW = nextW; curH = nextH;
+    }
   }
 
-  // Downscale back
-  const bigResult = document.createElement('canvas');
-  bigResult.width = BW; bigResult.height = BH;
-  bigResult.getContext('2d').putImageData(new ImageData(px, BW, BH), 0, 0);
-
-  const out = document.createElement('canvas');
-  out.width = W; out.height = H;
-  const outCtx = out.getContext('2d');
-  outCtx.imageSmoothingEnabled = true;
-  outCtx.imageSmoothingQuality = 'high';
-  if (scale === 1) {
-    outCtx.putImageData(new ImageData(px, BW, BH), 0, 0);
-  } else {
-    outCtx.drawImage(bigResult, 0, 0, W, H);
-  }
-  return out;
+  return resultCanvas;
 }
 
 function removeBackground(canvas, threshold) {
