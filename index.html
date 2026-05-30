@@ -816,109 +816,61 @@ function detectRegions(previewOnly = false) {
   const { data, width, height } = sourceImageData;
   const threshold = parseInt(document.getElementById('slThreshold').value);
   const minSize = settings.minSize;
+  const minDim = Math.sqrt(minSize); // 最小の幅/高さ
 
-  // 1. Build binary mask: 1 = non-background pixel
+  // ── 1. マスク生成 ──
   const mask = new Uint8Array(width * height);
   for (let i = 0; i < width * height; i++) {
     const r = data[i*4], g = data[i*4+1], b = data[i*4+2], a = data[i*4+3];
-    if (a < 30) continue; // transparent = background
-    const isWhite = r >= threshold && g >= threshold && b >= threshold;
-    if (!isWhite) mask[i] = 1;
+    if (a < 30) continue;
+    if (!(r >= threshold && g >= threshold && b >= threshold)) mask[i] = 1;
   }
 
-  // 2. Connected components via union-find
-  const label = new Int32Array(width * height).fill(-1);
-  const parent = [];
+  // ── 2. 行方向の投影（各行の非背景ピクセル数） ──
+  const rowProj = new Int32Array(height);
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++)
+      if (mask[y * width + x]) rowProj[y]++;
 
-  function find(x) {
-    while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; }
-    return x;
-  }
-  function unite(a, b) {
-    a = find(a); b = find(b);
-    if (a !== b) parent[b] = a;
-  }
+  // ── 3. 行の「白いスラブ」でY方向を分割 ──
+  const rowBands = splitByGaps(rowProj, height, minDim * 0.3);
 
-  let nextLabel = 0;
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      if (!mask[idx]) continue;
-      const up = y > 0 ? label[(y-1)*width+x] : -1;
-      const left = x > 0 ? label[y*width+x-1] : -1;
-      if (up === -1 && left === -1) {
-        label[idx] = nextLabel;
-        parent.push(nextLabel);
-        nextLabel++;
-      } else if (up !== -1 && left === -1) {
-        label[idx] = up;
-      } else if (up === -1 && left !== -1) {
-        label[idx] = left;
-      } else {
-        label[idx] = up;
-        unite(up, left);
-      }
-    }
-  }
+  // ── 4. 各行バンド内でX方向投影して列分割 ──
+  const rects = [];
+  for (const [ry1, ry2] of rowBands) {
+    const colProj = new Int32Array(width);
+    for (let y = ry1; y <= ry2; y++)
+      for (let x = 0; x < width; x++)
+        if (mask[y * width + x]) colProj[x]++;
 
-  // 3. Compute bounding boxes per component
-  const boxes = {};
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      const idx = y * width + x;
-      if (label[idx] === -1) continue;
-      const root = find(label[idx]);
-      if (!boxes[root]) boxes[root] = { minX: x, minY: y, maxX: x, maxY: y, count: 0 };
-      const b = boxes[root];
-      if (x < b.minX) b.minX = x;
-      if (y < b.minY) b.minY = y;
-      if (x > b.maxX) b.maxX = x;
-      if (y > b.maxY) b.maxY = y;
-      b.count++;
-    }
-  }
+    const colBands = splitByGaps(colProj, width, minDim * 0.3);
 
-  // 4. フィルタリング
-  let rects = Object.values(boxes)
-    .filter(b => b.count >= minSize)
-    .map(b => ({ x: b.minX, y: b.minY, w: b.maxX-b.minX, h: b.maxY-b.minY }));
-
-  // ── スマートマージ: 同一キャラのパーツだけ結合 ──
-  // gap = 小さい方のboxの短辺の35%以内、かつ最大25pxに制限
-  // → 離れたキャラ同士は絶対に合体しない
-  let didMerge = true;
-  while (didMerge) {
-    didMerge = false;
-    outer:
-    for (let i = 0; i < rects.length; i++) {
-      for (let j = i+1; j < rects.length; j++) {
-        const a = rects[i], b = rects[j];
-        const ax2 = a.x+a.w, ay2 = a.y+a.h;
-        const bx2 = b.x+b.w, by2 = b.y+b.h;
-        const gapX = Math.min(Math.min(a.w, b.w) * 0.35, 25);
-        const gapY = Math.min(Math.min(a.h, b.h) * 0.35, 25);
-        const closeX = Math.min(ax2, bx2) - Math.max(a.x, b.x) > -gapX;
-        const closeY = Math.min(ay2, by2) - Math.max(a.y, b.y) > -gapY;
-        if (closeX && closeY) {
-          rects[i] = {
-            x: Math.min(a.x, b.x), y: Math.min(a.y, b.y),
-            w: Math.max(ax2, bx2) - Math.min(a.x, b.x),
-            h: Math.max(ay2, by2) - Math.min(a.y, b.y)
-          };
-          rects.splice(j, 1);
-          didMerge = true;
-          break outer;
+    for (const [cx1, cx2] of colBands) {
+      // 実際の非背景ピクセル数を数えて小さすぎるものを除外
+      let count = 0;
+      let minX = cx2, maxX = cx1, minY = ry2, maxY = ry1;
+      for (let y = ry1; y <= ry2; y++) {
+        for (let x = cx1; x <= cx2; x++) {
+          if (mask[y * width + x]) {
+            count++;
+            if (x < minX) minX = x;
+            if (x > maxX) maxX = x;
+            if (y < minY) minY = y;
+            if (y > maxY) maxY = y;
+          }
         }
       }
+      if (count >= minSize) {
+        rects.push({ x: minX, y: minY, w: maxX - minX, h: maxY - minY });
+      }
     }
   }
 
-  // ── 上→下、左→右でソート（重心Y座標で行を判定）──
+  // ── 5. 上→下・左→右ソート ──
   rects.sort((a, b) => {
-    const midAy = a.y + a.h / 2;
-    const midBy = b.y + b.h / 2;
-    const rowThresh = Math.min(a.h, b.h) * 0.55;
-    if (Math.abs(midAy - midBy) > rowThresh) return midAy - midBy;
+    const midAy = a.y + a.h / 2, midBy = b.y + b.h / 2;
+    const thresh = Math.min(a.h, b.h) * 0.5;
+    if (Math.abs(midAy - midBy) > thresh) return midAy - midBy;
     return a.x - b.x;
   });
 
@@ -926,6 +878,21 @@ function detectRegions(previewOnly = false) {
   document.getElementById('statCount').textContent = rects.length;
   drawOverlay(rects);
   return rects;
+}
+
+// 投影配列をゼロ（白）ギャップで区間分割するユーティリティ
+function splitByGaps(proj, len, minLen) {
+  const bands = [];
+  let inBand = false, start = 0;
+  for (let i = 0; i < len; i++) {
+    if (!inBand && proj[i] > 0) { inBand = true; start = i; }
+    else if (inBand && proj[i] === 0) {
+      if (i - start >= minLen) bands.push([start, i - 1]);
+      inBand = false;
+    }
+  }
+  if (inBand && len - start >= minLen) bands.push([start, len - 1]);
+  return bands;
 }
 
 function drawOverlay(rects) {
